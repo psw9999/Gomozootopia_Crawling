@@ -1,3 +1,20 @@
+#######################################################################################################################
+#
+# Dart 크롤링 모듈
+#   Ver0.0.25 - 2022-05-27
+#
+# 정보
+#   0. 수요예측일 로직 수정
+#   0. 주간사 확인 로직 수정
+#   1. 영업이익 -> 당기순이익 수집으로 변경
+#   2. 당기순손실 수집 로직 추가
+#   3. 매출액, 당기순이익 수집 버그 수정
+#   4. 실권주 주간사 수집 로직 변경
+#   5. dart api 자금의 사용목적 추가
+#   6. 구주주 청약 시작/종료일 업데이트 로직 추가
+#   7. db 업로드 로직 수정
+#
+#######################################################################################################################
 from multiprocessing import cpu_count
 import OpenDartReader
 from xml.etree.ElementTree import Element, SubElement, ElementTree, dump
@@ -10,14 +27,11 @@ import pandas as pd
 import json
 import traceback
 from lib.slack import slack
-from lib.mysql_db import mysql_db
 from lib.dart_api import dart_api
 from lib.holiday_check import holiday_check
 
-
 class notIpoError(Exception):
     pass
-
 
 def line_info(return_type=None):
     import inspect
@@ -751,207 +765,7 @@ class DartCrawling:
                 "ipo_cancel_date": ipo_cancel_date,
                 "ipo_cancel_reason": ipo_cancel_reason}
         return dict
-    
 
-
-def upload_dict(cd):
-    global db, target_date
-    # 최근에 등록된 녀석이 있는경우 그 ipo_index를 기준으로 데이터를 업데이트 한다. 없을 경우 신규 insert.
-    # TODO ipo 조회시 종료일 기준으로 판단 할 것.
-    data = (cd["rcpname"], cd["rdartcode"], target_date)
-    db.query("SET @stock_name = %s, @dart_code = %s, @target_date = %s", data)
-    db.query("INSERT INTO ipo (stock_name, dart_code, regist_date) \
-                SELECT @stock_name, @dart_code, now() \
-                from dual \
-                WHERE NOT EXISTS ( \
-                    SELECT * FROM ipo \
-                    WHERE \
-                        dart_code = @dart_code AND \
-                        regist_date >= DATE_FORMAT(DATE_ADD(@target_date, INTERVAL -6 MONTH), '%Y-%m-%d'));")
-    result = db.query("SELECT ipo_index \
-                FROM ipo \
-                WHERE \
-                    dart_code = @dart_code AND \
-                    regist_date >= DATE_FORMAT(DATE_ADD(@target_date, INTERVAL -6 MONTH), '%Y-%m-%d');")
-    print(cd["rcpname"], "ipoIndex(DB넘버링) :", result[0][0])
-
-    ipo_index = None
-    if result:  # 기존 데이터가 DB에 있는지 확인.
-        ipo_index = result[0][0]
-    else:
-        pass
-
-    # udpate 쿼리문에는 반드시 `update_date` 도 넣을것.
-    report_type = cd["rcode"]
-    if report_type in "N00":  # DART API 지분증권
-        data = (ipo_index,
-                cd["rstockcode"],
-                cd["rcpindex"],
-                cd["induty_code"],
-                cd["apidata"]["ipo_schedule"]["ipo_start_date"],
-                cd["apidata"]["ipo_schedule"]["ipo_end_date"],
-                cd["apidata"]["ipo_schedule"]["ipo_refund_date"],
-                cd["apidata"]["put_back_option"]["who"],
-                cd["apidata"]["put_back_option"]["price"],
-                cd["apidata"]["put_back_option"]["deadline"],
-                cd["apidata"]["ipo_price_low"],
-                cd["apidata"]["par_value"],
-                cd["apidata"]["purpose_of_funds"])
-        db.query(
-            "set @ipo_index = %s,"
-            "@stock_code = %s,"
-            "@stock_exchange = %s,"
-            "@induty_code = %s,"
-            "@ipo_start_date = %s,"
-            "@ipo_end_date = %s,"
-            "@ipo_refund_date = %s,"
-            "@put_back_option_who = %s,"
-            "@put_back_option_price = %s,"
-            "@put_back_option_deadline = %s,"
-            "@number_of_ipo_shares = %s,"
-            "@par_value = %s,"
-            "@purpose_of_funds = %s;",
-            data)
-        if cd["kind"] == "실권주":
-            db.query("update ipo set "
-                     "stock_code = @stock_code,"
-                     "sector = @induty_code,"
-                     "stock_exchange = @stock_exchange,"
-                     "ex_start_date = @ipo_start_date,"
-                     "ex_end_date = @ipo_end_date,"
-                     "ipo_refund_date = @ipo_refund_date,"
-                     "put_back_option_who = @put_back_option_who,"
-                     "put_back_option_price = @put_back_option_price,"
-                     "put_back_option_deadline = @put_back_option_deadline,"
-                     "number_of_ipo_shares = @number_of_ipo_shares,"
-                     "par_value = @par_value,"
-                     "purpose_of_funds = @purpose_of_funds,"
-                     "update_date = NOW()"
-                     "where ipo_index = @ipo_index")
-        else:
-            db.query("update ipo set "
-                     "stock_code = @stock_code,"
-                     "sector = @induty_code,"
-                     "stock_exchange = @stock_exchange,"
-                     "ipo_start_date = @ipo_start_date,"
-                     "ipo_end_date = @ipo_end_date,"
-                     "ipo_refund_date = @ipo_refund_date,"
-                     "put_back_option_who = @put_back_option_who,"
-                     "put_back_option_price = @put_back_option_price,"
-                     "put_back_option_deadline = @put_back_option_deadline,"
-                     "number_of_ipo_shares = @number_of_ipo_shares,"
-                     "par_value = @par_value,"
-                     "purpose_of_funds = @purpose_of_funds,"
-                     "update_date = NOW()"
-                     "where ipo_index = @ipo_index")
-    elif report_type in "R00":  # 증권발행실적보고서
-        data = (ipo_index,
-                cd["ipo_debut_date"])
-        db.query("SET @ipo_index = %s,"
-                 "@ipo_debut_date = %s",
-                 data)
-        db.query("UPDATE ipo SET "
-                 "ipo_debut_date = DATE_FORMAT(@ipo_debut_date, '%Y-%m-%d'),"
-                 "update_date = NOW()"
-                 "WHERE ipo_index = @ipo_index")
-    elif report_type in "R01" or report_type in "R02":  # 증권신고서(지분증권)
-        data = (ipo_index,
-                cd["kind"],
-                cd["profit"],
-                cd["sales"],
-                cd["ipo_price_low"],
-                cd["ipo_price_high"],
-                cd["ipo_forecast_start"],
-                cd["ipo_forecast_end"],
-                cd["unclaimed_ipo_start_day"],
-                cd["unclaimed_ipo_end_day"])
-        db.query(
-            "set @ipo_index = %s,"
-            "@kind = %s,"
-            "@profits = %s,"
-            "@sales = %s,"
-            "@ipo_price_low = %s,"
-            "@ipo_price_high = %s,"
-            "@ipo_forecast_start = %s,"
-            "@ipo_forecast_end = %s,"
-            "@unclaimed_ipo_start_date = %s,"
-            "@unclaimed_ipo_end_date = %s;",
-            data)
-        db.query("update ipo set "
-                 "stock_kinds = @kind,"
-                 "profits = @profits,"
-                 "sales = @sales,"
-                 "ipo_price_low = @ipo_price_low,"
-                 "ipo_price_high = @ipo_price_high,"
-                 "ipo_forecast_start = @ipo_forecast_start,"
-                 "ipo_forecast_end = @ipo_forecast_end,"
-                 "ipo_start_date = @unclaimed_ipo_start_date,"
-                 "ipo_end_date = @unclaimed_ipo_end_date,"
-                 "update_date = NOW() "
-                 "where ipo_index = @ipo_index;")
-        for uname, uvalue in cd["stockQuantity"].items():
-            data = (ipo_index,
-                    uname,
-                    uvalue[1],
-                    uvalue[0],
-                    uvalue[3],
-                    uvalue[2])
-            db.query(
-                "set @ipo_index = %s,"
-                "@under_name = %s,"
-                "@ind_total_max = %s,"
-                "@ind_total_min = %s,"
-                "@ind_can_max = %s,"
-                "@ind_can_min = %s;",
-                data)
-            db.query("insert into ipo_underwriter "
-                     "(ipo_index, under_name, ind_total_max, ind_total_min, ind_can_max, ind_can_min, update_date) "
-                     "values (@ipo_index, @under_name, @ind_total_max, @ind_total_min, @ind_can_max, @ind_can_min, now()) "
-                     "on duplicate key "
-                     "update "
-                     "ind_total_max = @ind_total_max,"
-                     "ind_total_min = @ind_total_min,"
-                     "ind_can_max = @ind_can_max,"
-                     "ind_can_min = @ind_can_min,"
-                     "update_date = NOW();")
-    elif report_type in "R03":  # [발행조건확정]증권신고서(지분증권)
-        # todo. 여기에 최소증거금도 추가
-        data = (ipo_index,
-                cd["lock_up_percent"],
-                cd["ipo_institutional_acceptance_rate"],
-                cd["ipo_price"])
-        db.query("set @ipo_index = %s,"
-                 "@lock_up_percent = %s,"
-                 "@ipo_institutional_acceptance_rate = %s,"
-                 "@ipo_price = %s",
-                 data)
-        db.query("update ipo set "
-                 "lock_up_percent = @lock_up_percent,"
-                 "ipo_institutional_acceptance_rate = @ipo_institutional_acceptance_rate,"
-                 "ipo_price = @ipo_price,"
-                 "update_date = NOW() "
-                 "where ipo_index = @ipo_index")
-    elif report_type in "R04":  # 철회신고서
-        data = (ipo_index,
-                cd["ipo_cancel_bool"],
-                cd["ipo_cancel_date"],
-                cd["ipo_cancel_reason"],
-                cd["ipo_cancel_date"])
-        db.query("set @ipo_cancel_bool = %s,"
-                 "@ipo_cancel_date = %s,"
-                 "@ipo_cancel_reason = %s,"
-                 "@terminate_date = %s",
-                 data)
-        db.query("update ipo set "
-                 "ipo_cancel_bool = @ipo_cancel_bool,"
-                 "ipo_cancel_date = @ipo_cancel_date,"
-                 "ipo_cancel_reason = @ipo_cancel_reason,"
-                 "terminate_date = @terminate_date,"
-                 "update_date = NOW() "
-                 "where ipo_index = @ipo_index")
-    else:
-        print("해당보고서 형식은 데이터베이스 로직에서 지원하지 않습니다.")
-        pass
 
 
 #######################################################################################################################
@@ -963,30 +777,18 @@ if __name__ == "__main__":
     # 객체 생성 및 초기값 설정
     print(datetime.datetime.now(), "공휴일(holiday_check) 확인 모듈 초기화", flush=True)
     holiday = holiday_check.HolidayCheck(
-        "fF5OJkqdLH%2BOGt4%2F3F0FtaLc%2B4GsfqE%2BNxyg6iTAAl3NeK8jTGT26iCHraMiKTY%2FfXyHfox2azdPtitSo4SoXw%3D%3D")
+        "*************************************************************************************")
     print(datetime.datetime.now(), "슬랙(slack) 모듈 초기화", flush=True)
-    sl = slack.SlackBot("xoxb-3040674388865-3013432400759-NKjLH4nlL1CzMwDil9SYUpvh")
+    sl = slack.SlackBot("*************************************************************************************")
     print(datetime.datetime.now(), "다트(dart) 모듈 초기화", flush=True)
-    dart = DartCrawling("a5f0a27ad384e3e1af8ea81c2f0be00a419bfb1e")
-    dart_native = dart_api.DartApi("a5f0a27ad384e3e1af8ea81c2f0be00a419bfb1e")
-    print(datetime.datetime.now(), "데이터베이스(mysql_db) 모듈 초기화", flush=True)
-    # db = mysql_db.MysqlDB("34.135.81.32", 3306, "stockServer", "admin", "P@ssVV0rd")
-    db = mysql_db.MysqlDB("34.135.81.32", 3306, "stockServer", "everywhere", "everypw")
-    db.connection()
-    db.query("SET collation_connection = 'utf8mb4_general_ci';")
+    dart = DartCrawling("*************************************************************************************")
+    dart_native = dart_api.DartApi("*************************************************************************************")
 
     sl.slack_post_message('#crawling', '크롤링 로직 가동이 시작되었습니다.')
     sl.slack_post_message('#test', '크롤링 로직 가동이 시작되었습니다.')
 
     while True:
         target_date = input("\n\n보고서 탐색일을 입력해주세요 :")
-        # target_date = "2021-10-05"
-        # target_date = "2021-12-17"
-        # target_date = "2021-12-22"  # 대한전선 증권신고서 - datetime.datetime.now()
-        # target_date = "2022-01-19"  # 대한전선 증권신고서 - datetime.datetime.now()
-        # target_date = "2021-11-30"  # 래몽래인 증권신고서 - datetime.datetime.now()
-        # target_date = "2021-12-23"  # 래몽래인 - datetime.datetime.now()
-        # target_date = "2022-01-21"  # LG에너지솔루션 - datetime.datetime.now()
         print("크롤링 기준일자 : " + target_date)
         if holiday.is_it(target_date):
             yyyy, mm, dd = target_date.split('-')
@@ -1074,19 +876,6 @@ if __name__ == "__main__":
                               "rdartcode": rdartcode, "kind": crawling_dict["kind"]}
                 check_api_list.append(check_dict)
 
-                # 데이터베이스 업로드
-                if type(crawling_dict) == type(None):
-                    pass
-                else:
-                    try:
-                        upload_dict(crawling_dict)
-                    except Exception as e:
-                        sl.slack_post_message("#crawling", "*[ERROR]*[" + line_info("info") + "][데이터베이스] ```" +
-                                              str(e) + "[" + str(rcode) + "] " + str(rcpname) + "(" + str(
-                            rstockcode) + ")(" + str(
-                            rdartcode) + "```")
-                        print(str(rcpname), traceback.format_exc())
-
             # 정상적으로 크롤링된 종목들의 추가정보를 DART API에서 불러옴. (모든 타이밍에 조회하여 최신자료로 갱신진행)
             print("===================================[DART_API_N00]===================================")
             for api_dict in check_api_list:
@@ -1138,15 +927,4 @@ if __name__ == "__main__":
                                           str(e) + "[" + str(api_dict["rcode"]) + "] " + str(
                         api_dict["rcpname"]) + "(" + str(api_dict["rstockcode"]) + ")(" + str(
                         api_dict["rdartcode"]) + "```")
-                    print(str(api_dict["rcpname"]), traceback.format_exc())
-
-                # 데이터베이스 업로드
-                try:
-                    upload_dict(api_dict)
-                except Exception as e:
-                    sl.slack_post_message("#crawling",
-                                          "*[ERROR]*[" + line_info("info") + "][데이터베이스 - DART지분증권API] ```" +
-                                          str(e) + "[" + str(api_dict["rcode"]) + "] " + str(
-                                              api_dict["rcpname"]) + "(" + str(api_dict["rstockcode"]) + ")(" + str(
-                                              api_dict["rdartcode"]) + "```")
                     print(str(api_dict["rcpname"]), traceback.format_exc())
